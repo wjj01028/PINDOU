@@ -3,6 +3,10 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import '../helpers/layout_helper.dart';
 
+/// 裁剪页面图片控件的背景色
+/// 用于在透明 PNG 区域显示醒目背景，方便区分主体与透明区
+const Color kCropImageBackgroundColor = Color(0xFFFFD600);
+
 /// 裁剪范围选择页面
 class CropPage extends StatefulWidget {
   final Uint8List imageBytes;
@@ -181,6 +185,7 @@ class _CropPageState extends State<CropPage> {
                     height: renderH,
                     child: Stack(
                       children: [
+                        Container(color: kCropImageBackgroundColor),
                         Image.memory(widget.imageBytes, width: renderW, height: renderH, fit: BoxFit.fill),
                         if (_hasSelection) ...[
                           // 四周暗色遮罩

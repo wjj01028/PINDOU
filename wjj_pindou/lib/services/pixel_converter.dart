@@ -3,109 +3,164 @@ import '../data/mard_colors.dart';
 
 /// 像素化转换器 - 将图片转换为拼豆图纸
 class PixelConverter {
-  /// 抠除图片背景：基于 OpenCV 风格的白底检测 + 形态学处理
+  /// 抠除图片背景：基于边缘洪水填充的智能分割
   ///
-  /// 流程（对应 OpenCV 操作）：
-  /// 1. 读取图片（image 包解码后即为 RGBA 格式，等同于已从 BGR 转为 RGB）
-  /// 2. 白色背景容差：定义容差范围，接近白色 (255,255,255) 的像素视为背景
-  /// 3. 生成二值掩码（对应 cv2.inRange）：背景像素=0，主体像素=255
-  /// 4. 形态学操作：先腐蚀后膨胀（开运算）去除噪点、平滑边缘
-  /// 5. 将掩码作为 Alpha 通道合并到原图，背景变为透明
-  /// 6. 保持图片原始尺寸不变
+  /// 原理（对应 OpenCV 的 Canny + findContours + 填充思路）：
+  ///   从图片四个边缘出发，沿白色像素向外"洪水填充"，所有能通过连续白色
+  ///   路径到达边缘的区域即为背景。被非白色像素包围的内部白色不会被触及，
+  ///   因此主体内部的白色得以保留。
+  ///
+  /// 流程：
+  /// 1. 读取图片（image 包解码后即为 RGBA，等同于 BGR→RGB 转换）
+  /// 2. 定义白色背景容差（R/G/B >= 225）
+  /// 3. 从四边边缘所有白色像素出发 BFS 洪水填充
+  /// 4. 被标记到的区域 = 背景（alpha=0, RGB 清零）
+  /// 5. 未被标记的区域 = 主体（保留原始 RGB, alpha=255）
+  /// 6. 形态学闭运算（先膨胀后腐蚀）封闭细缝、去除内部噪点
+  /// 7. 保持图片原始尺寸不变
   static img.Image removeBackground(img.Image src) {
     final w = src.width;
     final h = src.height;
     final total = w * h;
 
-    // ---- 步骤 1 & 2：定义白色背景容差 ----
-    // image 包解码后格式为 RGBA，等同于 OpenCV 的 cvtColor(BGR, RGB)
-    // 白色在 RGB 中为 (255, 255, 255)，定义容差 threshold
+    // ---- 步骤 1：定义白色背景容差 ----
     const int tolerance = 30;
     const int threshold = 255 - tolerance; // 225
-    // 当 R、G、B 三个通道值都 >= 225 时，视为接近白色的背景像素
 
-    // ---- 步骤 3：生成二值掩码（对应 cv2.inRange） ----
-    // 背景像素 = 0（黑色），主体像素 = 255（白色）
-    final mask = List<int>.filled(total, 0);
+    // ---- 步骤 2：标记所有"白色"像素 ----
+    // isWhite[i] = 该像素接近白色
+    final isWhite = List<bool>.filled(total, false);
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
         final p = src.getPixel(x, y);
-        final r = p.r.toInt();
-        final g = p.g.toInt();
-        final b = p.b.toInt();
-
-        if (r >= threshold && g >= threshold && b >= threshold) {
-          mask[y * w + x] = 0; // 背景
-        } else {
-          mask[y * w + x] = 255; // 前景（主体）
-        }
+        isWhite[y * w + x] = (p.r.toInt() >= threshold &&
+                              p.g.toInt() >= threshold &&
+                              p.b.toInt() >= threshold);
       }
     }
 
-    // ---- 步骤 4：形态学操作（开运算 = 先腐蚀后膨胀） ----
-    // 去除孤立噪点，平滑主体边缘
-    const kernelSize = 3;
-    final eroded = _morphErode(mask, w, h, kernelSize);
-    final opened = _morphDilate(eroded, w, h, kernelSize);
+    // ---- 步骤 3：从四边边缘白色像素出发 BFS 洪水填充 ----
+    // 对应 OpenCV: cv2.floodFill(mask, seedPoint=边缘点, newVal=背景标记)
+    final visited = List<bool>.filled(total, false);
+    final queue = <int>[];
+    int head = 0;
+
+    // 上边 & 下边
+    for (int x = 0; x < w; x++) {
+      final topIdx = x;
+      final bottomIdx = (h - 1) * w + x;
+      if (isWhite[topIdx] && !visited[topIdx]) {
+        visited[topIdx] = true;
+        queue.add(topIdx);
+      }
+      if (isWhite[bottomIdx] && !visited[bottomIdx]) {
+        visited[bottomIdx] = true;
+        queue.add(bottomIdx);
+      }
+    }
+    // 左边 & 右边（跳过角）
+    for (int y = 1; y < h - 1; y++) {
+      final leftIdx = y * w;
+      final rightIdx = y * w + (w - 1);
+      if (isWhite[leftIdx] && !visited[leftIdx]) {
+        visited[leftIdx] = true;
+        queue.add(leftIdx);
+      }
+      if (isWhite[rightIdx] && !visited[rightIdx]) {
+        visited[rightIdx] = true;
+        queue.add(rightIdx);
+      }
+    }
+
+    // BFS 展开
+    while (head < queue.length) {
+      final idx = queue[head++];
+      final x = idx % w;
+      final y = idx ~/ w;
+
+      // 4-邻域
+      if (x > 0) {
+        final n = idx - 1;
+        if (isWhite[n] && !visited[n]) { visited[n] = true; queue.add(n); }
+      }
+      if (x < w - 1) {
+        final n = idx + 1;
+        if (isWhite[n] && !visited[n]) { visited[n] = true; queue.add(n); }
+      }
+      if (y > 0) {
+        final n = idx - w;
+        if (isWhite[n] && !visited[n]) { visited[n] = true; queue.add(n); }
+      }
+      if (y < h - 1) {
+        final n = idx + w;
+        if (isWhite[n] && !visited[n]) { visited[n] = true; queue.add(n); }
+      }
+    }
+
+    // ---- 步骤 4：形态学闭运算（先膨胀后腐蚀）封闭细缝 ----
+    // visited=背景(1), 非visited=前景(0)
+    final dilated = _morphDilateBool(visited, w, h, 3);
+    final closed = _morphErodeBool(dilated, w, h, 3);
 
     // ---- 步骤 5：将掩码作为 Alpha 通道合并到原图 ----
-    // 背景像素 alpha=0（透明），主体像素 alpha=255（不透明）
-    final result = img.Image.from(src);
+    // 关键：必须显式创建 RGBA 格式图片（numChannels=4），否则 JPEG 等无 Alpha
+    // 格式的源图会导致 setPixelRgba 的 alpha 被丢弃，背景显示为黑色
+    // 背景像素（closed[i]=true）：RGBA (0,0,0,0) 完全透明
+    // 主体像素（closed[i]=false）：保留原始 RGB，alpha=255
+    final result = img.Image(width: w, height: h, numChannels: 4);
     for (int i = 0; i < total; i++) {
       final x = i % w;
       final y = i ~/ w;
-      final p = src.getPixel(x, y);
-      result.setPixelRgba(x, y, p.r.toInt(), p.g.toInt(), p.b.toInt(), opened[i]);
+      if (closed[i]) {
+        result.setPixelRgba(x, y, 0, 0, 0, 0);
+      } else {
+        final p = src.getPixel(x, y);
+        result.setPixelRgba(x, y, p.r.toInt(), p.g.toInt(), p.b.toInt(), 255);
+      }
     }
 
     return result;
   }
 
-  /// 形态学腐蚀：对掩码执行最小值滤波
-  /// 3x3 核内取最小值，前景区域缩小，消除小噪点
-  static List<int> _morphErode(List<int> mask, int w, int h, int kernel) {
-    final result = List<int>.filled(w * h, 0);
+  /// 形态学膨胀（bool 版）：对 true 区域执行最大值扩散
+  static List<bool> _morphDilateBool(List<bool> mask, int w, int h, int kernel) {
+    final result = List<bool>.filled(w * h, false);
     final half = kernel ~/ 2;
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
-        int minVal = 255;
+        bool found = false;
+        outer:
         for (int ky = -half; ky <= half; ky++) {
           for (int kx = -half; kx <= half; kx++) {
-            final nx = x + kx;
-            final ny = y + ky;
+            final nx = x + kx, ny = y + ky;
             if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
-              if (mask[ny * w + nx] < minVal) {
-                minVal = mask[ny * w + nx];
-              }
+              if (mask[ny * w + nx]) { found = true; break outer; }
             }
           }
         }
-        result[y * w + x] = minVal;
+        result[y * w + x] = found;
       }
     }
     return result;
   }
 
-  /// 形态学膨胀：对掩码执行最大值滤波
-  /// 3x3 核内取最大值，前景区域扩大，恢复主体边缘
-  static List<int> _morphDilate(List<int> mask, int w, int h, int kernel) {
-    final result = List<int>.filled(w * h, 0);
+  /// 形态学腐蚀（bool 版）：对 true 区域执行最小值收缩
+  static List<bool> _morphErodeBool(List<bool> mask, int w, int h, int kernel) {
+    final result = List<bool>.filled(w * h, false);
     final half = kernel ~/ 2;
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
-        int maxVal = 0;
+        bool all = true;
+        outer:
         for (int ky = -half; ky <= half; ky++) {
           for (int kx = -half; kx <= half; kx++) {
-            final nx = x + kx;
-            final ny = y + ky;
+            final nx = x + kx, ny = y + ky;
             if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
-              if (mask[ny * w + nx] > maxVal) {
-                maxVal = mask[ny * w + nx];
-              }
+              if (!mask[ny * w + nx]) { all = false; break outer; }
             }
           }
         }
-        result[y * w + x] = maxVal;
+        result[y * w + x] = all;
       }
     }
     return result;
@@ -125,13 +180,10 @@ class PixelConverter {
     final targetHeight = beadHeight ?? 
         (sourceImage.height * beadWidth / sourceImage.width).round();
     
-    // 像素化：缩放图片到目标尺寸
-    final pixelated = img.copyResize(
-      sourceImage,
-      width: targetWidth,
-      height: targetHeight,
-      interpolation: img.Interpolation.average, // 使用平均值插值获得更平滑的效果
-    );
+    // 从源图区域采样：每个输出单元格取源图中对应区域的加权平均色
+    // 逐像素采样可避免单点采样遗漏细线（如1px宽边框），同时正确处理 Alpha 通道
+    final double cellW = sourceImage.width / targetWidth;
+    final double cellH = sourceImage.height / targetHeight;
     
     // 颜色匹配：将每个像素匹配到最接近的MARD颜色
     final grid = <GridCell>[];
@@ -139,26 +191,53 @@ class PixelConverter {
     
     for (int y = 0; y < targetHeight; y++) {
       for (int x = 0; x < targetWidth; x++) {
-        final pixel = pixelated.getPixel(x, y);
-        final r = pixel.r.toInt();
-        final g = pixel.g.toInt();
-        final b = pixel.b.toInt();
+        // 该输出单元格对应的源图区域范围
+        final int srcX0 = (x * cellW).round().clamp(0, sourceImage.width - 1);
+        final int srcY0 = (y * cellH).round().clamp(0, sourceImage.height - 1);
+        final int srcX1 = ((x + 1) * cellW).round().clamp(srcX0, sourceImage.width);
+        final int srcY1 = ((y + 1) * cellH).round().clamp(srcY0, sourceImage.height);
         
-        // 检查是否为透明/背景像素（跳过）
-        // 1. alpha 低于阈值的透明像素
-        // 2. 近白色像素（透明背景混合产物）
-        if (pixel.a < 200 || _isBackgroundPixel(r, g, b, pixel.a.toInt())) {
-          grid.add(GridCell(
-            x: x,
-            y: y,
-            color: null,
-            isEmpty: true,
-          ));
+        // 对该区域内所有不透明像素取加权平均色
+        int sumR = 0, sumG = 0, sumB = 0, count = 0;
+        double weightedR = 0, weightedG = 0, weightedB = 0;
+        double totalWeight = 0;
+        
+        for (int sy = srcY0; sy < srcY1; sy++) {
+          for (int sx = srcX0; sx < srcX1; sx++) {
+            final sp = sourceImage.getPixel(sx, sy);
+            if (sp.a < 200) continue;
+            final w = sp.a / 255.0;
+            weightedR += sp.r * w;
+            weightedG += sp.g * w;
+            weightedB += sp.b * w;
+            totalWeight += w;
+            sumR += sp.r.toInt();
+            sumG += sp.g.toInt();
+            sumB += sp.b.toInt();
+            count++;
+          }
+        }
+        
+        // 区域内全部透明：跳过
+        if (count == 0) {
+          grid.add(GridCell(x: x, y: y, color: null, isEmpty: true));
           continue;
         }
         
+        // 使用 alpha 加权平均（若权重不足则回退到简单平均）
+        final int avgR, avgG, avgB;
+        if (totalWeight > 0.01) {
+          avgR = (weightedR / totalWeight).round().clamp(0, 255);
+          avgG = (weightedG / totalWeight).round().clamp(0, 255);
+          avgB = (weightedB / totalWeight).round().clamp(0, 255);
+        } else {
+          avgR = (sumR ~/ count).clamp(0, 255);
+          avgG = (sumG ~/ count).clamp(0, 255);
+          avgB = (sumB ~/ count).clamp(0, 255);
+        }
+        
         // 找到最接近的MARD颜色
-        final matchedColor = _findClosestColor(r, g, b, maxColors);
+        final matchedColor = _findClosestColor(avgR, avgG, avgB, maxColors);
         
         grid.add(GridCell(
           x: x,
@@ -174,6 +253,9 @@ class PixelConverter {
         }
       }
     }
+    
+    // 颜色合并：将相似颜色合并为同一色号，统一边框等近似色
+    _mergeSimilarColors(grid, colorCounts, maxColors);
     
     // 生成材料清单
     final materialList = colorCounts.entries
@@ -251,34 +333,72 @@ class PixelConverter {
     return _colorLUT![idx];
   }
   
-  /// 判断是否为背景像素（透明背景下应忽略的颜色）
-  /// 关键：只有来自透明混合的低 alpha 近白色才跳过；
-  ///       图案内部完全不透明的白色（a>=250）应保留为白色豆子
-  static bool _isBackgroundPixel(int r, int g, int b, int a) {
-    // 颜色与纯白的距离
-    final distToWhite = ((255 - r) * (255 - r) +
-                         (255 - g) * (255 - g) +
-                         (255 - b) * (255 - b)) ~/ 441;
+  /// 计算颜色距离（加权RGB）
+  /// 使用CIEDE2000的简化版本
+  static double _colorDistanceRGB(int r1, int g1, int b1, int r2, int g2, int b2) {
+    final  dr = r1 - r2, dg = g1 - g2, db = b1 - b2;
+    return (dr * dr + dg * dg + db * db).toDouble();
+  }
+  
+  /// 合并相似颜色：将网格中色距极近的颜色统一为同一 Mard 色号
+  /// 优先保留使用次数更多的颜色，将相近的低频颜色替换为高频颜色
+  static void _mergeSimilarColors(
+    List<GridCell> grid,
+    Map<String, int> colorCounts,
+    int maxColors,
+  ) {
+    const double mergeThreshold = 900.0; // RGB 欧氏距离平方阈值（约30）
     
-    // 颜色饱和度
-    final mean = (r + g + b) ~/ 3;
-    final variance = ((r - mean) * (r - mean) +
-                      (g - mean) * (g - mean) +
-                      (b - mean) * (b - mean)) ~/ 3;
+    // 收集使用的颜色及其频次
+    final entries = colorCounts.entries
+        .map((e) => (code: e.key, count: e.value, mc: MardColorPalette.getByCode(e.key)!))
+        .toList();
+    if (entries.length <= maxColors) return;
     
-    // 条件1: 透明度低的混合背景（半透明近白 + 低饱和）
-    // alpha < 250 说明来自透明背景混合，不应保留
-    if (a < 250 && distToWhite < 80 && variance < 300) {
-      return true;
+    // 按使用次数降序排序
+    entries.sort((a, b) => b.count.compareTo(a.count));
+    
+    // 保留颜色列表（code -> 是否保留）
+    final kept = <String, String>{}; // 原始 code -> 合并后 code
+    final keptColors = <(int, int, int)>[];
+    final keptCodes = <String>[];
+    
+    for (final e in entries) {
+      // 检查是否与已保留的颜色过于相似
+      String? mergeInto;
+      for (int i = 0; i < keptColors.length; i++) {
+        final (kr, kg, kb) = keptColors[i];
+        final d = _colorDistanceRGB(e.mc.r, e.mc.g, e.mc.b, kr, kg, kb);
+        if (d < mergeThreshold) {
+          mergeInto = keptCodes[i];
+          break;
+        }
+      }
+      
+      if (mergeInto != null) {
+        kept[e.code] = mergeInto;
+      } else {
+        kept[e.code] = e.code;
+        keptColors.add((e.mc.r, e.mc.g, e.mc.b));
+        keptCodes.add(e.code);
+      }
     }
     
-    // 条件2: 极近白色 + 低饱和 —— 仅当 alpha 也不足时才跳过
-    // alpha=255 的纯白是图案内部的白色，必须保留！
-    if (a < 240 && distToWhite < 15 && variance < 100) {
-      return true;
+    // 应用颜色替换到网格
+    for (final cell in grid) {
+      if (cell.isEmpty || cell.color == null) continue;
+      final merged = kept[cell.color!.code];
+      if (merged != null && merged != cell.color!.code) {
+        cell.color = MardColorPalette.getByCode(merged);
+      }
     }
     
-    return false;
+    // 重建颜色统计
+    colorCounts.clear();
+    for (final cell in grid) {
+      if (cell.isEmpty || cell.color == null) continue;
+      colorCounts[cell.color!.code] = (colorCounts[cell.color!.code] ?? 0) + 1;
+    }
   }
   
   /// 计算颜色距离（加权RGB）
@@ -408,7 +528,7 @@ class PixelConverter {
   static img.Image generatePreviewGrid(PatternResult result) {
     const cellSize = 32;          // 预览单元格大小
     const gridLineWidth = 1;
-    const fontScale = 2;          // 色号字体
+    const baseFontScale = 2;      // 2位色号基准字体
 
     final gridW = result.width * cellSize;
     final gridH = result.height * cellSize;
@@ -451,8 +571,9 @@ class PixelConverter {
         }
       }
 
-      // 色号居中
+      // 色号居中：3位及以上的型号字体缩小 30%
       final code = cell.color!.code;
+      final fontScale = code.length <= 2 ? baseFontScale : (baseFontScale * 0.7).round().clamp(1, 10);
       final tc = _textColorForBackground(mc.r, mc.g, mc.b);
       final tw = _textWidth(code, fontScale);
       final tx = sx + (cellSize - tw) ~/ 2;
@@ -644,13 +765,14 @@ class PixelConverter {
         }
       }
 
-      // 色号居中
+      // 色号居中：3位及以上的型号字体缩小 30%
       final code = cell.color!.code;
+      final effGridFont = code.length <= 2 ? gridFont : (gridFont * 0.7).round().clamp(1, 10);
       final tc = _textColorForBackground(mc.r, mc.g, mc.b);
-      final tw = _textWidth(code, gridFont);
+      final tw = _textWidth(code, effGridFont);
       final tx = sx + (cellSize - tw) ~/ 2;
-      final ty = sy + (cellSize - 7 * gridFont) ~/ 2;
-      _drawText(image, code, tx, ty, tc, gridFont);
+      final ty = sy + (cellSize - 7 * effGridFont) ~/ 2;
+      _drawText(image, code, tx, ty, tc, effGridFont);
     }
 
     // ======== 分隔线 ========
@@ -749,7 +871,7 @@ class PixelConverter {
 class GridCell {
   final int x;
   final int y;
-  final MardColor? color;
+  MardColor? color;
   final bool isEmpty;
   
   GridCell({

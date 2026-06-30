@@ -1,7 +1,9 @@
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image/image.dart' as img;
+import 'package:path/path.dart' as p;
 import '../services/pixel_converter.dart';
 import '../helpers/layout_helper.dart';
 import 'pattern_preview_page.dart';
@@ -78,14 +80,18 @@ class _HomePageState extends State<HomePage>
     setState(() => _isProcessing = true);
 
     try {
-      // 1. 在原图上抠除背景
+      // 1. 在原图上抠除背景，生成透明 PNG
       final image = img.decodeImage(bytes);
       if (image == null) {
         _showError('无法解析图片');
         return;
       }
       final maskedImage = PixelConverter.removeBackground(image);
+      // 将抠图结果编码为 PNG 字节，确保 Alpha 通道完整序列化
       final maskedBytes = Uint8List.fromList(img.encodePng(maskedImage));
+
+      // 1.1 将透明 PNG 保存到原图同目录，命名 原图名_clear.png
+      _saveMaskedImage(maskedBytes);
 
       if (!mounted) return;
       setState(() => _isProcessing = false);
@@ -104,9 +110,14 @@ class _HomePageState extends State<HomePage>
 
       setState(() => _isProcessing = true);
 
-      // 3. 裁剪抠图后的图像，直接生成图纸
+      // 3. 从 PNG 字节重新解码，保证 Alpha 通道完整，然后裁剪并生成图纸
+      final decoded = img.decodeImage(maskedBytes);
+      if (decoded == null) {
+        _showError('解码图片失败');
+        return;
+      }
       final croppedImage = img.copyCrop(
-        maskedImage, x: cropX, y: cropY, width: cropW - cropX, height: cropH - cropY,
+        decoded, x: cropX, y: cropY, width: cropW - cropX, height: cropH - cropY,
       );
       final result = PixelConverter.convert(
         sourceImage: croppedImage,
@@ -142,6 +153,19 @@ class _HomePageState extends State<HomePage>
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
     );
+  }
+
+  void _saveMaskedImage(Uint8List pngBytes) {
+    try {
+      final srcPath = _selectedImage?.path;
+      if (srcPath == null) return;
+      final dir = p.dirname(srcPath);
+      final baseName = p.basenameWithoutExtension(srcPath);
+      final outPath = p.join(dir, '${baseName}_clear.png');
+      File(outPath).writeAsBytesSync(pngBytes);
+    } catch (_) {
+      // 保存失败不阻塞主流程
+    }
   }
 
   @override
