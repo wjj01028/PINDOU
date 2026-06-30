@@ -166,13 +166,28 @@ class PixelConverter {
     return result;
   }
   
+  /// 统计原图中实际出现的不同 RGB 颜色数（忽略透明度 < 200 的像素）
+  static int _countSourceColors(img.Image sourceImage) {
+    final seen = <int>{};
+    for (int y = 0; y < sourceImage.height; y++) {
+      for (int x = 0; x < sourceImage.width; x++) {
+        final p = sourceImage.getPixel(x, y);
+        if (p.a < 200) continue;
+        // 将 RGB 三通道打包为一个 int 做去重
+        seen.add((p.r.toInt() << 16) | (p.g.toInt() << 8) | p.b.toInt());
+      }
+    }
+    return seen.length;
+  }
+
   /// 将图片像素化为指定尺寸的网格
-  /// 使用加权RGB距离算法匹配MARD 221色
+  ///
+  /// 核心思路：逐像素匹配 MARD 色 → 单元格内取众数（mode），
+  /// 从而避免 RGB 平均引入原图不存在的中间色，导致生成颜色数远多于原图。
   static PatternResult convert({
     required img.Image sourceImage,
     required int beadWidth,      // 拼豆宽度（豆子数量）
     int? beadHeight,             // 拼豆高度（可选，自动计算保持比例）
-    int maxColors = 50,          // 最大颜色数限制
     bool useDithering = false,   // 是否使用抖动算法
   }) {
     // 计算目标尺寸
@@ -180,14 +195,33 @@ class PixelConverter {
     final targetHeight = beadHeight ?? 
         (sourceImage.height * beadWidth / sourceImage.width).round();
     
-    // 从源图区域采样：每个输出单元格取源图中对应区域的加权平均色
-    // 逐像素采样可避免单点采样遗漏细线（如1px宽边框），同时正确处理 Alpha 通道
+    // 自动检测原图颜色数，作为最终输出颜色的上限
+    final int sourceColorCount = _countSourceColors(sourceImage);
+    final int maxColors = (sourceColorCount * 1.2).ceil().clamp(2, 50);
+    
+    // 确保 LUT 已初始化
+    _ensureLUT();
+    
     final double cellW = sourceImage.width / targetWidth;
     final double cellH = sourceImage.height / targetHeight;
     
-    // 颜色匹配：将每个像素匹配到最接近的MARD颜色
     final grid = <GridCell>[];
     final colorCounts = <String, int>{};
+    
+    // 预计算所有像素的 MARD 色号（避免重复查询 LUT）
+    final pixelColorCodes = List<String?>.filled(
+      sourceImage.width * sourceImage.height, null,
+    );
+    for (int y = 0; y < sourceImage.height; y++) {
+      for (int x = 0; x < sourceImage.width; x++) {
+        final p = sourceImage.getPixel(x, y);
+        if (p.a < 200) continue;
+        final mc = _findClosestColor(p.r.toInt(), p.g.toInt(), p.b.toInt());
+        if (mc != null) {
+          pixelColorCodes[y * sourceImage.width + x] = mc.code;
+        }
+      }
+    }
     
     for (int y = 0; y < targetHeight; y++) {
       for (int x = 0; x < targetWidth; x++) {
@@ -197,47 +231,30 @@ class PixelConverter {
         final int srcX1 = ((x + 1) * cellW).round().clamp(srcX0, sourceImage.width);
         final int srcY1 = ((y + 1) * cellH).round().clamp(srcY0, sourceImage.height);
         
-        // 对该区域内所有不透明像素取加权平均色
-        int sumR = 0, sumG = 0, sumB = 0, count = 0;
-        double weightedR = 0, weightedG = 0, weightedB = 0;
-        double totalWeight = 0;
-        
+        // 统计该区域内每种 MARD 色号的出现次数，取众数
+        final codeCounts = <String, int>{};
+        int totalCount = 0;
         for (int sy = srcY0; sy < srcY1; sy++) {
           for (int sx = srcX0; sx < srcX1; sx++) {
-            final sp = sourceImage.getPixel(sx, sy);
-            if (sp.a < 200) continue;
-            final w = sp.a / 255.0;
-            weightedR += sp.r * w;
-            weightedG += sp.g * w;
-            weightedB += sp.b * w;
-            totalWeight += w;
-            sumR += sp.r.toInt();
-            sumG += sp.g.toInt();
-            sumB += sp.b.toInt();
-            count++;
+            final code = pixelColorCodes[sy * sourceImage.width + sx];
+            if (code == null) continue;
+            codeCounts[code] = (codeCounts[code] ?? 0) + 1;
+            totalCount++;
           }
         }
         
         // 区域内全部透明：跳过
-        if (count == 0) {
+        if (totalCount == 0) {
           grid.add(GridCell(x: x, y: y, color: null, isEmpty: true));
           continue;
         }
         
-        // 使用 alpha 加权平均（若权重不足则回退到简单平均）
-        final int avgR, avgG, avgB;
-        if (totalWeight > 0.01) {
-          avgR = (weightedR / totalWeight).round().clamp(0, 255);
-          avgG = (weightedG / totalWeight).round().clamp(0, 255);
-          avgB = (weightedB / totalWeight).round().clamp(0, 255);
-        } else {
-          avgR = (sumR ~/ count).clamp(0, 255);
-          avgG = (sumG ~/ count).clamp(0, 255);
-          avgB = (sumB ~/ count).clamp(0, 255);
-        }
+        // 取出现次数最多的色号
+        String bestCode = codeCounts.entries
+            .reduce((a, b) => a.value >= b.value ? a : b)
+            .key;
         
-        // 找到最接近的MARD颜色
-        final matchedColor = _findClosestColor(avgR, avgG, avgB, maxColors);
+        final matchedColor = MardColorPalette.getByCode(bestCode);
         
         grid.add(GridCell(
           x: x,
@@ -247,14 +264,11 @@ class PixelConverter {
         ));
         
         // 统计颜色使用次数
-        if (matchedColor != null) {
-          colorCounts[matchedColor.code] = 
-              (colorCounts[matchedColor.code] ?? 0) + 1;
-        }
+        colorCounts[bestCode] = (colorCounts[bestCode] ?? 0) + 1;
       }
     }
     
-    // 颜色合并：将相似颜色合并为同一色号，统一边框等近似色
+    // 颜色合并：将相似颜色合并为同一色号
     _mergeSimilarColors(grid, colorCounts, maxColors);
     
     // 生成材料清单
@@ -324,7 +338,7 @@ class PixelConverter {
   }
   
   /// 使用加权RGB距离找到最接近的MARD颜色（LUT 优化版）
-  static MardColor? _findClosestColor(int r, int g, int b, int maxColors) {
+  static MardColor? _findClosestColor(int r, int g, int b) {
     _ensureLUT();
     final rq = (r * _lutScale).round().clamp(0, _lutLevels - 1);
     final gq = (g * _lutScale).round().clamp(0, _lutLevels - 1);
@@ -333,67 +347,78 @@ class PixelConverter {
     return _colorLUT![idx];
   }
   
-  /// 计算颜色距离（加权RGB）
-  /// 使用CIEDE2000的简化版本
-  static double _colorDistanceRGB(int r1, int g1, int b1, int r2, int g2, int b2) {
-    final  dr = r1 - r2, dg = g1 - g2, db = b1 - b2;
-    return (dr * dr + dg * dg + db * db).toDouble();
-  }
-  
-  /// 合并相似颜色：将网格中色距极近的颜色统一为同一 Mard 色号
-  /// 优先保留使用次数更多的颜色，将相近的低频颜色替换为高频颜色
+  /// 合并相似颜色：迭代合并最近的颜色对，直到颜色数 <= maxColors
+  /// 每次合并保留使用次数更多的颜色，将低频颜色替换为高频颜色
   static void _mergeSimilarColors(
     List<GridCell> grid,
     Map<String, int> colorCounts,
     int maxColors,
   ) {
-    const double mergeThreshold = 900.0; // RGB 欧氏距离平方阈值（约30）
+    if (colorCounts.length <= maxColors) return;
     
-    // 收集使用的颜色及其频次
-    final entries = colorCounts.entries
-        .map((e) => (code: e.key, count: e.value, mc: MardColorPalette.getByCode(e.key)!))
-        .toList();
-    if (entries.length <= maxColors) return;
+    // 构建合并映射表：原始色号 -> 最终保留的色号
+    final merged = <String, String>{};
+    for (final code in colorCounts.keys) {
+      merged[code] = code;
+    }
     
-    // 按使用次数降序排序
-    entries.sort((a, b) => b.count.compareTo(a.count));
-    
-    // 保留颜色列表（code -> 是否保留）
-    final kept = <String, String>{}; // 原始 code -> 合并后 code
-    final keptColors = <(int, int, int)>[];
-    final keptCodes = <String>[];
-    
-    for (final e in entries) {
-      // 检查是否与已保留的颜色过于相似
-      String? mergeInto;
-      for (int i = 0; i < keptColors.length; i++) {
-        final (kr, kg, kb) = keptColors[i];
-        final d = _colorDistanceRGB(e.mc.r, e.mc.g, e.mc.b, kr, kg, kb);
-        if (d < mergeThreshold) {
-          mergeInto = keptCodes[i];
-          break;
+    // 迭代合并：每次找出距离最近的两个不同颜色，合并为一个
+    while (true) {
+      // 当前去重后的颜色集合
+      final uniqueCodes = <String>{};
+      for (final v in merged.values) {
+        uniqueCodes.add(v);
+      }
+      if (uniqueCodes.length <= maxColors) break;
+      
+      // 找出距离最近的两个颜色
+      double minDist = double.infinity;
+      String? c1, c2;
+      
+      final codes = uniqueCodes.toList();
+      for (int i = 0; i < codes.length; i++) {
+        final mc1 = MardColorPalette.getByCode(codes[i])!;
+        for (int j = i + 1; j < codes.length; j++) {
+          final mc2 = MardColorPalette.getByCode(codes[j])!;
+          final d = _calculateColorDistance(mc1.r, mc1.g, mc1.b, mc2.r, mc2.g, mc2.b);
+          if (d < minDist) {
+            minDist = d;
+            c1 = codes[i];
+            c2 = codes[j];
+          }
         }
       }
       
-      if (mergeInto != null) {
-        kept[e.code] = mergeInto;
-      } else {
-        kept[e.code] = e.code;
-        keptColors.add((e.mc.r, e.mc.g, e.mc.b));
-        keptCodes.add(e.code);
+      if (c1 == null || c2 == null) break;
+      
+      // 保留使用次数更多的颜色，合并另一个
+      final count1 = colorCounts[c1] ?? 0;
+      final count2 = colorCounts[c2] ?? 0;
+      final survivor = count1 >= count2 ? c1 : c2;
+      final victim = count1 >= count2 ? c2 : c1;
+      
+      // 更新映射：所有映射到 victim 的色号改为映射到 survivor
+      for (final key in merged.keys) {
+        if (merged[key] == victim) {
+          merged[key] = survivor;
+        }
       }
+      
+      // 更新颜色统计
+      colorCounts[survivor] = (colorCounts[survivor] ?? 0) + (colorCounts[victim] ?? 0);
+      colorCounts.remove(victim);
     }
     
     // 应用颜色替换到网格
     for (final cell in grid) {
       if (cell.isEmpty || cell.color == null) continue;
-      final merged = kept[cell.color!.code];
-      if (merged != null && merged != cell.color!.code) {
-        cell.color = MardColorPalette.getByCode(merged);
+      final target = merged[cell.color!.code];
+      if (target != null && target != cell.color!.code) {
+        cell.color = MardColorPalette.getByCode(target);
       }
     }
     
-    // 重建颜色统计
+    // 重建最终颜色统计
     colorCounts.clear();
     for (final cell in grid) {
       if (cell.isEmpty || cell.color == null) continue;

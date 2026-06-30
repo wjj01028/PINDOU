@@ -27,7 +27,6 @@ class _HomePageState extends State<HomePage>
   final ImagePicker _picker = ImagePicker();
 
   int _beadWidth = 29;
-  int _maxColors = 25;
   bool _isProcessing = false;
   PatternResult? _result;
 
@@ -122,7 +121,6 @@ class _HomePageState extends State<HomePage>
       final result = PixelConverter.convert(
         sourceImage: croppedImage,
         beadWidth: _beadWidth,
-        maxColors: _maxColors,
       );
       setState(() => _result = result);
 
@@ -559,16 +557,6 @@ class _HomePageState extends State<HomePage>
             description: '推荐：29豆 = 1块标准底板',
           ),
           SizedBox(height: LayoutHelper.smallGap(context)),
-          _buildSliderSetting(
-            label: '最大颜色数',
-            value: _maxColors.toDouble(),
-            min: 5,
-            max: 50,
-            unit: '色',
-            onChanged: (v) => setState(() => _maxColors = v.round()),
-            description: '颜色越少，制作越简单',
-          ),
-          SizedBox(height: LayoutHelper.smallGap(context)),
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -579,9 +567,9 @@ class _HomePageState extends State<HomePage>
                     fontSize: LayoutHelper.smallSize(context),
                     color: Colors.grey),
               ),
-              _buildPresetButton('入门', 20, 15),
-              _buildPresetButton('标准', 29, 25),
-              _buildPresetButton('精细', 50, 40),
+              _buildPresetButton('入门', 20),
+              _buildPresetButton('标准', 29),
+              _buildPresetButton('精细', 50),
             ],
           ),
         ],
@@ -650,12 +638,11 @@ class _HomePageState extends State<HomePage>
     );
   }
 
-  Widget _buildPresetButton(String label, int width, int colors) {
-    final isSelected = _beadWidth == width && _maxColors == colors;
+  Widget _buildPresetButton(String label, int width) {
+    final isSelected = _beadWidth == width;
     return GestureDetector(
       onTap: () => setState(() {
         _beadWidth = width;
-        _maxColors = colors;
       }),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
