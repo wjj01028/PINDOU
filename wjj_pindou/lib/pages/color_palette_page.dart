@@ -43,22 +43,24 @@ class _ColorPalettePageState extends State<ColorPalettePage> {
 
   Widget _buildSeriesNav() {
     final seriesList = MardColorPalette.getSeriesList();
-    final columns = LayoutHelper.gridColumns(context);
     final bodySz = LayoutHelper.bodySize(context);
 
     return Container(
-      height: LayoutHelper.isWide(context) ? 72 : 60,
-      margin: EdgeInsets.all(LayoutHelper.gap(context)),
-      child: GridView.count(
-        crossAxisCount: columns,
-        childAspectRatio: 2,
-        crossAxisSpacing: 4,
-        mainAxisSpacing: 4,
-        children: seriesList.map((s) {
+      height: LayoutHelper.isWide(context) ? 56 : 44,
+      margin: EdgeInsets.symmetric(
+          horizontal: LayoutHelper.gap(context),
+          vertical: LayoutHelper.isWide(context) ? 12 : 8),
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: seriesList.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final s = seriesList[index];
           final isSelected = _selectedSeries == s['code'];
           return GestureDetector(
             onTap: () => setState(() => _selectedSeries = s['code']),
             child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
               decoration: BoxDecoration(
                 gradient: isSelected
                     ? const LinearGradient(
@@ -82,14 +84,14 @@ class _ColorPalettePageState extends State<ColorPalettePage> {
                 children: [
                   Text(s['code'],
                       style: TextStyle(
-                          fontSize: bodySz,
+                          fontSize: bodySz - 2,
                           fontWeight: FontWeight.bold,
                           color: isSelected
                               ? Colors.white
                               : const Color(0xFF0D47A1))),
                   Text('${s['count']}色',
                       style: TextStyle(
-                          fontSize: LayoutHelper.smallSize(context),
+                          fontSize: LayoutHelper.smallSize(context) - 2,
                           color: isSelected
                               ? Colors.white.withValues(alpha: 0.8)
                               : Colors.grey.shade600)),
@@ -97,7 +99,7 @@ class _ColorPalettePageState extends State<ColorPalettePage> {
               ),
             ),
           );
-        }).toList(),
+        },
       ),
     );
   }

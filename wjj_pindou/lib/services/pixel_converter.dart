@@ -596,9 +596,11 @@ class PixelConverter {
         }
       }
 
-      // 色号居中：3位及以上的型号字体缩小 30%
+      // 色号居中：2位码缩小30%，3位及以上基于2位码再缩10%
       final code = cell.color!.code;
-      final fontScale = code.length <= 2 ? baseFontScale : (baseFontScale * 0.7).round().clamp(1, 10);
+      final fontScale = code.length <= 2
+          ? (baseFontScale * 0.7).round().clamp(1, 10)
+          : (baseFontScale * 0.63).round().clamp(1, 10);
       final tc = _textColorForBackground(mc.r, mc.g, mc.b);
       final tw = _textWidth(code, fontScale);
       final tx = sx + (cellSize - tw) ~/ 2;
@@ -714,50 +716,84 @@ class PixelConverter {
   /// 生成完整导出图纸（网格+色号+底部材料清单）
   /// 输出适配 A4 纸 300 DPI 打印，网格填满幅面，材料列表字体放大
   static img.Image generateExportImage(PatternResult result) {
-    // A4 打印尺寸 (300 DPI, 15mm 边距)
+    // A4 打印尺寸: 210mm × 297mm, 300 DPI, 上下左右各 10mm 边距
     const printDPI = 300.0;
-    const marginMM = 15.0;
-    final printW = ((210 - marginMM * 2) / 25.4 * printDPI).round(); // ~2126px
-    final materialListPerRow = 6; // 材料清单每行卡片数
-    const cardTextFont = 3;       // 卡片文字放大 3 倍
+    const marginMM = 10.0;
+    final marginPx = (marginMM / 25.4 * printDPI).round(); // 10mm → px
+
+    // A4 页面总像素
+    final pageW = (210 / 25.4 * printDPI).round(); // ~2480px
+    final pageH = (297 / 25.4 * printDPI).round(); // ~3508px
+
+    // 可用区域 (页面 - 边距)
+    final usableW = pageW - marginPx * 2;
+    final usableH = pageH - marginPx * 2;
+
+    // 图案占 90% 高度，材料清单占 10% 高度
+    final maxPatternH = (usableH * 0.90).round();
 
     final beadW = result.width;
     final beadH = result.height;
-    
-    // 网格单元格自适应 A4 宽度
-    final cellSize = (printW / beadW).round().clamp(28, 120);
+
+    // 网格单元格自适应 A4 可用宽度
+    int cellSize = (usableW / beadW).round().clamp(28, 120);
     final gridFont = (cellSize / 15.0).round().clamp(2, 5);
-    
+
     const gridLineWidth = 2;
-    final gridW = beadW * cellSize;
-    final gridH = beadH * cellSize;
+    int gridW = beadW * cellSize;
+    int gridH = beadH * cellSize;
 
-    // 材料清单卡片尺寸（放大）
-    const cardPad = 20;
-    const cardBdr = 2;
-    const cardGapV = 14;
-    const cardGapH = 14;
-    const swatchW = 40;
-    const swatchH = 48;
-    const cardW = cardPad * 2 + cardBdr * 2 + swatchW + 14 + 100; // 色块 + 间距 + 文字区
-    const cardH = cardPad * 2 + cardBdr * 2 + swatchH;
-    
-    final gapH = (20.0 / 25.4 * printDPI).round(); // 20mm 间距
-    final rows = (result.materialList.length + materialListPerRow - 1) ~/ materialListPerRow;
-    final listPadTop = 30;
-    final listTitleH = 50;
-    final listPadBot = 30;
-    final listH = listPadTop + listTitleH + rows * (cardH + cardGapV) + listPadBot;
+    // 如果图案高度超出 90%，缩小 cellSize
+    if (gridH > maxPatternH) {
+      cellSize = (maxPatternH / beadH).round().clamp(28, 120);
+      gridW = beadW * cellSize;
+      gridH = beadH * cellSize;
+    }
 
-    final totalH = gridH + gapH + listH;
+    // 网格在页面中水平居中
+    final gridX0 = marginPx + (usableW - gridW) ~/ 2;
+    final gridY0 = marginPx;
 
-    final image = img.Image(width: gridW, height: totalH);
+    // 材料清单：按色号排序
+    final sortedList = List<MaterialItem>.from(result.materialList)
+      ..sort((a, b) => a.color.code.compareTo(b.color.code));
+
+    // 材料清单卡片布局 (10% 高度, 卡片宽度+20%)
+    const materialListPerRow = 8;
+    const cardTextFont = 2;
+    const cardPad = 6;
+    const cardBdr = 1;
+    const swatchW = 20;
+    const swatchH = 24;
+    const textW = 76; // 文字区域 (+20%)
+    const cardW = cardPad * 2 + cardBdr * 2 + swatchW + 8 + textW; // ~118px
+    const cardH = cardPad * 2 + cardBdr * 2 + swatchH; // 38px
+    const cardGapV = 4;
+    const cardGapH = 6;
+
+    final rows = (sortedList.length + materialListPerRow - 1) ~/ materialListPerRow;
+    const listPadTop = 6;
+    const listPadBot = 6;
+    final listContentH = rows * (cardH + cardGapV) - (rows > 0 ? cardGapV : 0);
+    final listH = listPadTop + listContentH + listPadBot;
+
+    // 清单在 A4 页面中的位置
+    final listY0 = gridY0 + maxPatternH + (usableH - maxPatternH - listH) ~/ 2;
+
+    // 清单左/右边距 1cm
+    final listMarginLR = marginPx;
+    final listUsableW = usableW - listMarginLR * 2;
+    final totalCardWidth = materialListPerRow * cardW + (materialListPerRow - 1) * cardGapH;
+    final cardsX0 = marginPx + listMarginLR + (listUsableW - totalCardWidth) ~/ 2;
+
+    // 创建 A4 页面图像
+    final image = img.Image(width: pageW, height: pageH);
     img.fill(image, color: img.ColorRgba8(255, 255, 255, 255));
 
     // ======== 网格图纸 ========
     for (final cell in result.grid) {
-      final sx = cell.x * cellSize;
-      final sy = cell.y * cellSize;
+      final sx = gridX0 + cell.x * cellSize;
+      final sy = gridY0 + cell.y * cellSize;
 
       if (cell.isEmpty || cell.color == null) {
         for (int dy = 0; dy < cellSize; dy++) {
@@ -790,9 +826,11 @@ class PixelConverter {
         }
       }
 
-      // 色号居中：3位及以上的型号字体缩小 30%
+      // 色号居中：2位码缩小37%，3位及以上基于2位码再缩10%
       final code = cell.color!.code;
-      final effGridFont = code.length <= 2 ? gridFont : (gridFont * 0.7).round().clamp(1, 10);
+      final effGridFont = code.length <= 2
+          ? (gridFont * 0.63).round().clamp(1, 10)
+          : (gridFont * 0.57).round().clamp(1, 10);
       final tc = _textColorForBackground(mc.r, mc.g, mc.b);
       final tw = _textWidth(code, effGridFont);
       final tx = sx + (cellSize - tw) ~/ 2;
@@ -800,37 +838,30 @@ class PixelConverter {
       _drawText(image, code, tx, ty, tc, effGridFont);
     }
 
-    // ======== 分隔线 ========
-    final sepY = gridH + gapH ~/ 2;
-    for (int x = 0; x < gridW; x++) {
-      image.setPixel(x, sepY, img.ColorRgba8(200, 200, 200, 255));
-    }
-
-    // ======== 材料清单 ========
-    final listY0 = gridH + gapH;
-
-    // 清单背景
-    for (int y = listY0; y < totalH; y++) {
-      for (int x = 0; x < gridW; x++) {
-        image.setPixel(x, y, img.ColorRgba8(250, 250, 250, 255));
+    // ======== 分隔虚线 ========
+    final sepY = listY0 - 4;
+    for (int x = marginPx; x < pageW - marginPx; x += 8) {
+      for (int i = 0; i < 2; i++) {
+        if (x + i < image.width) {
+          image.setPixel(x + i, sepY, img.ColorRgba8(180, 180, 180, 255));
+        }
       }
     }
 
-    // 标题
-    _drawText(image, 'Material  List', 16, listY0 + listPadTop,
-        img.ColorRgba8(50, 50, 50, 255), 4);
+    // ======== 材料清单 ========
+    // 清单背景
+    for (int y = listY0; y < listY0 + listH; y++) {
+      for (int x = marginPx; x < pageW - marginPx; x++) {
+        if (x < image.width && y < image.height) {
+          image.setPixel(x, y, img.ColorRgba8(250, 250, 250, 255));
+        }
+      }
+    }
 
-    // 副标题
-    final sub = '${result.width}x${result.height} beads  /  ${result.colorCount} colors  /  ${result.totalBeads} pcs';
-    _drawText(image, sub, 24, listY0 + listPadTop + 30,
-        img.ColorRgba8(140, 140, 140, 255), 2);
+    final cardsY0 = listY0 + listPadTop;
 
-    final cardsY0 = listY0 + listPadTop + listTitleH;
-    final totalCardWidth = materialListPerRow * cardW + (materialListPerRow - 1) * cardGapH;
-    final cardsX0 = (gridW - totalCardWidth) ~/ 2;
-
-    for (int i = 0; i < result.materialList.length; i++) {
-      final item = result.materialList[i];
+    for (int i = 0; i < sortedList.length; i++) {
+      final item = sortedList[i];
       final col = i % materialListPerRow;
       final rowIdx = i ~/ materialListPerRow;
 
@@ -845,7 +876,7 @@ class PixelConverter {
           }
         }
       }
-      // 边框（2px 粗）
+      // 边框
       for (int t = 0; t < cardBdr; t++) {
         for (int py = cy; py < cy + cardH; py++) {
           if (py < image.height) {
@@ -878,14 +909,14 @@ class PixelConverter {
         }
       }
 
-      // 色号 + 数量（放大字体）
-      final tX = swX + swatchW + 14;
-      final tY = swY + 6;
+      // 色号 + 数量 (垂直居中)
+      final tX = swX + swatchW + 8;
+      final tY = cy + (cardH - 7 * cardTextFont) ~/ 2;
       _drawText(image, item.color.code, tX, tY,
           img.ColorRgba8(30, 30, 30, 255), cardTextFont);
-      final cntX = tX + _textWidth(item.color.code, cardTextFont) + 12;
-      _drawText(image, 'x${item.count}', cntX, tY + 4,
-          img.ColorRgba8(140, 140, 140, 255), cardTextFont);
+      final cntX = tX + _textWidth(item.color.code, cardTextFont) + 8;
+      _drawText(image, 'x${item.count}', cntX, tY,
+          img.ColorRgba8(130, 130, 130, 255), cardTextFont);
     }
 
     return image;

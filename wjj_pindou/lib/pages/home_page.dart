@@ -8,7 +8,6 @@ import '../services/pixel_converter.dart';
 import '../helpers/layout_helper.dart';
 import 'pattern_preview_page.dart';
 import 'color_palette_page.dart';
-import 'crop_page.dart';
 
 /// 主页面 - 图片上传和参数设置
 class HomePage extends StatefulWidget {
@@ -93,33 +92,11 @@ class _HomePageState extends State<HomePage>
       _saveMaskedImage(maskedBytes);
 
       if (!mounted) return;
-      setState(() => _isProcessing = false);
-
-      // 2. 进入裁剪页面，显示抠图后的结果
-      final cropResult = await Navigator.push<(int, int, int, int)>(
-        context,
-        MaterialPageRoute(
-          builder: (context) => CropPage(imageBytes: maskedBytes),
-        ),
-      );
-
-      if (cropResult == null || !mounted) return;
-
-      final (cropX, cropY, cropW, cropH) = cropResult;
-
       setState(() => _isProcessing = true);
 
-      // 3. 从 PNG 字节重新解码，保证 Alpha 通道完整，然后裁剪并生成图纸
-      final decoded = img.decodeImage(maskedBytes);
-      if (decoded == null) {
-        _showError('解码图片失败');
-        return;
-      }
-      final croppedImage = img.copyCrop(
-        decoded, x: cropX, y: cropY, width: cropW - cropX, height: cropH - cropY,
-      );
+      // 2. 直接使用全图生成图纸
       final result = PixelConverter.convert(
-        sourceImage: croppedImage,
+        sourceImage: maskedImage,
         beadWidth: _beadWidth,
       );
       setState(() => _result = result);

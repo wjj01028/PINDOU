@@ -310,42 +310,97 @@ class _PatternPreviewPageState extends State<PatternPreviewPage> {
       return const Center(child: CircularProgressIndicator());
     }
 
-    return Stack(
-      children: [
-        InteractiveViewer(
-          transformationController: _transformCtrl,
-          minScale: 0.3,
-          maxScale: 10.0,
-          panEnabled: true,
-          scaleEnabled: true,
-          constrained: false,
-          child: Center(
-            child: Image.memory(bytes, fit: BoxFit.contain),
-          ),
-        ),
-        if (_fullscreen)
-          Positioned(
-            top: MediaQuery.of(context).padding.top + 4,
-            right: 8,
-            child: _buildFloatingToolbar(),
-          ),
-      ],
-    );
-  }
+    return LayoutBuilder(builder: (context, constraints) {
+      final image = img.decodeImage(bytes);
+      final imgW = image?.width ?? 1;
+      final imgH = image?.height ?? 1;
+      final fitScale = (constraints.maxWidth / imgW)
+          .clamp(0.0, constraints.maxHeight / imgH);
 
-  Widget _buildFloatingToolbar() {
-    return Row(
-      children: [
-        _buildMiniBtn(Icons.photo_library_outlined,
-            () => setState(() => _showGrid = !_showGrid),
-            _showGrid ? '效果' : '网格'),
-        const SizedBox(width: 4),
-        _buildMiniBtn(Icons.zoom_out_map, _resetZoom, '1:1'),
-        const SizedBox(width: 4),
-        _buildMiniBtn(Icons.fullscreen_exit,
-            () => setState(() => _fullscreen = false), '退出'),
-      ],
-    );
+      void zoomIn() {
+        final current = _transformCtrl.value.getMaxScaleOnAxis();
+        final newScale = (current * 1.3).clamp(fitScale, 10.0);
+        _transformCtrl.value = Matrix4.identity()..scale(newScale);
+      }
+
+      void zoomOut() {
+        final current = _transformCtrl.value.getMaxScaleOnAxis();
+        final newScale = (current / 1.3).clamp(fitScale, 10.0);
+        _transformCtrl.value = Matrix4.identity()..scale(newScale);
+      }
+
+      return Stack(
+        children: [
+          InteractiveViewer(
+            transformationController: _transformCtrl,
+            minScale: fitScale,
+            maxScale: 10.0,
+            panEnabled: true,
+            scaleEnabled: true,
+            constrained: true,
+            child: Center(
+              child: Image.memory(bytes, fit: BoxFit.contain),
+            ),
+          ),
+          // 右上角缩放按钮
+          Positioned(
+            top: _fullscreen
+                ? MediaQuery.of(context).padding.top + 4
+                : 8,
+            right: 8,
+            child: Column(
+              children: [
+                GestureDetector(
+                  onTap: zoomIn,
+                  child: Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      borderRadius:
+                          const BorderRadius.vertical(top: Radius.circular(8)),
+                    ),
+                    child: const Icon(Icons.add,
+                        size: 20, color: Colors.white),
+                  ),
+                ),
+                Container(
+                  width: 36,
+                  height: 1,
+                  color: Colors.white.withValues(alpha: 0.15),
+                ),
+                GestureDetector(
+                  onTap: zoomOut,
+                  child: Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      borderRadius: const BorderRadius.vertical(
+                          bottom: Radius.circular(8)),
+                    ),
+                    child: const Icon(Icons.remove,
+                        size: 20, color: Colors.white),
+                  ),
+                ),
+                if (_fullscreen) const SizedBox(height: 8),
+                if (_fullscreen)
+                  _buildMiniBtn(Icons.photo_library_outlined,
+                      () => setState(() => _showGrid = !_showGrid),
+                      _showGrid ? '效果' : '网格'),
+                if (_fullscreen) const SizedBox(height: 4),
+                if (_fullscreen)
+                  _buildMiniBtn(Icons.zoom_out_map, _resetZoom, '1:1'),
+                if (_fullscreen) const SizedBox(height: 4),
+                if (_fullscreen)
+                  _buildMiniBtn(Icons.fullscreen_exit,
+                      () => setState(() => _fullscreen = false), '退出'),
+              ],
+            ),
+          ),
+        ],
+      );
+    });
   }
 
   Widget _buildMiniBtn(IconData icon, VoidCallback onTap, String label) {
