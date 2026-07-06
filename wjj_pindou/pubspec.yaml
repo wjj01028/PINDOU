@@ -51,7 +51,7 @@ dependencies:
   pdf: ^3.11.2
   
   # 打印功能
-  printing: ^5.14.2
+  printing: ^5.14.3
 
 dev_dependencies:
   flutter_test:

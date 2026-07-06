@@ -8,6 +8,7 @@ plugins {
 android {
     namespace = "com.example.wjj_pindou"
     compileSdk = flutter.compileSdkVersion
+    buildToolsVersion = "36.0.0"
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
