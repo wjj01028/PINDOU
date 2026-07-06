@@ -26,6 +26,7 @@ class _HomePageState extends State<HomePage>
   final ImagePicker _picker = ImagePicker();
 
   int _beadWidth = 29;
+  bool _removeBackground = true;
   bool _isProcessing = false;
   PatternResult? _result;
 
@@ -78,25 +79,23 @@ class _HomePageState extends State<HomePage>
     setState(() => _isProcessing = true);
 
     try {
-      // 1. 在原图上抠除背景，生成透明 PNG
       final image = img.decodeImage(bytes);
       if (image == null) {
         _showError('无法解析图片');
         return;
       }
-      final maskedImage = PixelConverter.removeBackground(image);
-      // 将抠图结果编码为 PNG 字节，确保 Alpha 通道完整序列化
-      final maskedBytes = Uint8List.fromList(img.encodePng(maskedImage));
 
-      // 1.1 将透明 PNG 保存到原图同目录，命名 原图名_clear.png
-      _saveMaskedImage(maskedBytes);
+      img.Image processedImage;
+      if (_removeBackground) {
+        processedImage = PixelConverter.removeBackground(image);
+        final maskedBytes = Uint8List.fromList(img.encodePng(processedImage));
+        _saveMaskedImage(maskedBytes);
+      } else {
+        processedImage = image;
+      }
 
-      if (!mounted) return;
-      setState(() => _isProcessing = true);
-
-      // 2. 直接使用全图生成图纸
       final result = PixelConverter.convert(
-        sourceImage: maskedImage,
+        sourceImage: processedImage,
         beadWidth: _beadWidth,
       );
       setState(() => _result = result);
@@ -534,6 +533,13 @@ class _HomePageState extends State<HomePage>
             description: '推荐：29豆 = 1块标准底板',
           ),
           SizedBox(height: LayoutHelper.smallGap(context)),
+          _buildSwitchSetting(
+            label: '移除背景',
+            value: _removeBackground,
+            onChanged: (v) => setState(() => _removeBackground = v),
+            description: '自动检测并移除图片背景色',
+          ),
+          SizedBox(height: LayoutHelper.smallGap(context)),
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -551,6 +557,40 @@ class _HomePageState extends State<HomePage>
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildSwitchSetting({
+    required String label,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+    required String description,
+  }) {
+    final bodySz = LayoutHelper.bodySize(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(label,
+                style:
+                    TextStyle(fontSize: bodySz, fontWeight: FontWeight.w500)),
+            Switch(
+              value: value,
+              onChanged: onChanged,
+              activeColor: const Color(0xFF1565C0),
+              activeTrackColor: const Color(0xFFE3F2FD),
+              inactiveTrackColor: Colors.grey.shade300,
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(description,
+            style: TextStyle(
+                fontSize: LayoutHelper.smallSize(context),
+                color: Colors.grey.shade500)),
+      ],
     );
   }
 

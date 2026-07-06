@@ -6,40 +6,54 @@ class PixelConverter {
   /// 抠除图片背景：基于边缘洪水填充的智能分割
   ///
   /// 原理（对应 OpenCV 的 Canny + findContours + 填充思路）：
-  ///   从图片四个边缘出发，沿白色像素向外"洪水填充"，所有能通过连续白色
-  ///   路径到达边缘的区域即为背景。被非白色像素包围的内部白色不会被触及，
-  ///   因此主体内部的白色得以保留。
+  ///   1. 自动检测背景色：采样图片四边边缘像素，找到最常见的颜色作为背景色
+  ///   2. 从图片四个边缘出发，沿与背景色相近的像素向外"洪水填充"，所有能通过
+  ///      连续背景色路径到达边缘的区域即为背景
+  ///   3. 被非背景色像素包围的内部背景色区域不会被触及，因此主体内部的背景色得以保留
   ///
   /// 流程：
   /// 1. 读取图片（image 包解码后即为 RGBA，等同于 BGR→RGB 转换）
-  /// 2. 定义白色背景容差（R/G/B >= 225）
-  /// 3. 从四边边缘所有白色像素出发 BFS 洪水填充
-  /// 4. 被标记到的区域 = 背景（alpha=0, RGB 清零）
-  /// 5. 未被标记的区域 = 主体（保留原始 RGB, alpha=255）
-  /// 6. 形态学闭运算（先膨胀后腐蚀）封闭细缝、去除内部噪点
-  /// 7. 保持图片原始尺寸不变
+  /// 2. 采样边缘像素，自动检测背景色
+  /// 3. 定义背景色容差
+  /// 4. 从四边边缘所有背景色像素出发 BFS 洪水填充
+  /// 5. 被标记到的区域 = 背景（alpha=0, RGB 清零）
+  /// 6. 未被标记的区域 = 主体（保留原始 RGB, alpha=255）
+  /// 7. 形态学闭运算（先膨胀后腐蚀）封闭细缝、去除内部噪点
+  /// 8. 保持图片原始尺寸不变
   static img.Image removeBackground(img.Image src) {
     final w = src.width;
     final h = src.height;
     final total = w * h;
 
-    // ---- 步骤 1：定义白色背景容差 ----
-    const int tolerance = 30;
-    const int threshold = 255 - tolerance; // 225
+    // ---- 步骤 1：自动检测背景色 ----
+    // 采样四边边缘像素，找到最常见的颜色
+    final bgColor = _detectBackgroundColor(src);
+    if (bgColor == null) {
+      // 无法检测背景色，直接返回原图
+      return src;
+    }
 
-    // ---- 步骤 2：标记所有"白色"像素 ----
-    // isWhite[i] = 该像素接近白色
-    final isWhite = List<bool>.filled(total, false);
+    // ---- 步骤 2：定义背景色容差 ----
+    const int tolerance = 40;
+
+    // ---- 步骤 3：标记所有背景色像素 ----
+    // isBackground[i] = 该像素接近背景色
+    final isBackground = List<bool>.filled(total, false);
     for (int y = 0; y < h; y++) {
       for (int x = 0; x < w; x++) {
         final p = src.getPixel(x, y);
-        isWhite[y * w + x] = (p.r.toInt() >= threshold &&
-                              p.g.toInt() >= threshold &&
-                              p.b.toInt() >= threshold);
+        final r = p.r.toInt();
+        final g = p.g.toInt();
+        final b = p.b.toInt();
+        final dr = r - bgColor[0];
+        final dg = g - bgColor[1];
+        final db = b - bgColor[2];
+        // 使用欧几里得距离判断是否接近背景色
+        isBackground[y * w + x] = (dr * dr + dg * dg + db * db) <= (tolerance * tolerance);
       }
     }
 
-    // ---- 步骤 3：从四边边缘白色像素出发 BFS 洪水填充 ----
+    // ---- 步骤 4：从四边边缘背景色像素出发 BFS 洪水填充 ----
     // 对应 OpenCV: cv2.floodFill(mask, seedPoint=边缘点, newVal=背景标记)
     final visited = List<bool>.filled(total, false);
     final queue = <int>[];
@@ -49,11 +63,11 @@ class PixelConverter {
     for (int x = 0; x < w; x++) {
       final topIdx = x;
       final bottomIdx = (h - 1) * w + x;
-      if (isWhite[topIdx] && !visited[topIdx]) {
+      if (isBackground[topIdx] && !visited[topIdx]) {
         visited[topIdx] = true;
         queue.add(topIdx);
       }
-      if (isWhite[bottomIdx] && !visited[bottomIdx]) {
+      if (isBackground[bottomIdx] && !visited[bottomIdx]) {
         visited[bottomIdx] = true;
         queue.add(bottomIdx);
       }
@@ -62,11 +76,11 @@ class PixelConverter {
     for (int y = 1; y < h - 1; y++) {
       final leftIdx = y * w;
       final rightIdx = y * w + (w - 1);
-      if (isWhite[leftIdx] && !visited[leftIdx]) {
+      if (isBackground[leftIdx] && !visited[leftIdx]) {
         visited[leftIdx] = true;
         queue.add(leftIdx);
       }
-      if (isWhite[rightIdx] && !visited[rightIdx]) {
+      if (isBackground[rightIdx] && !visited[rightIdx]) {
         visited[rightIdx] = true;
         queue.add(rightIdx);
       }
@@ -81,28 +95,28 @@ class PixelConverter {
       // 4-邻域
       if (x > 0) {
         final n = idx - 1;
-        if (isWhite[n] && !visited[n]) { visited[n] = true; queue.add(n); }
+        if (isBackground[n] && !visited[n]) { visited[n] = true; queue.add(n); }
       }
       if (x < w - 1) {
         final n = idx + 1;
-        if (isWhite[n] && !visited[n]) { visited[n] = true; queue.add(n); }
+        if (isBackground[n] && !visited[n]) { visited[n] = true; queue.add(n); }
       }
       if (y > 0) {
         final n = idx - w;
-        if (isWhite[n] && !visited[n]) { visited[n] = true; queue.add(n); }
+        if (isBackground[n] && !visited[n]) { visited[n] = true; queue.add(n); }
       }
       if (y < h - 1) {
         final n = idx + w;
-        if (isWhite[n] && !visited[n]) { visited[n] = true; queue.add(n); }
+        if (isBackground[n] && !visited[n]) { visited[n] = true; queue.add(n); }
       }
     }
 
-    // ---- 步骤 4：形态学闭运算（先膨胀后腐蚀）封闭细缝 ----
+    // ---- 步骤 5：形态学闭运算（先膨胀后腐蚀）封闭细缝 ----
     // visited=背景(1), 非visited=前景(0)
     final dilated = _morphDilateBool(visited, w, h, 3);
     final closed = _morphErodeBool(dilated, w, h, 3);
 
-    // ---- 步骤 5：将掩码作为 Alpha 通道合并到原图 ----
+    // ---- 步骤 6：将掩码作为 Alpha 通道合并到原图 ----
     // 关键：必须显式创建 RGBA 格式图片（numChannels=4），否则 JPEG 等无 Alpha
     // 格式的源图会导致 setPixelRgba 的 alpha 被丢弃，背景显示为黑色
     // 背景像素（closed[i]=true）：RGBA (0,0,0,0) 完全透明
@@ -120,6 +134,78 @@ class PixelConverter {
     }
 
     return result;
+  }
+
+  /// 自动检测背景色：采样四边边缘像素，找到最常见的颜色
+  /// 返回 [r, g, b] 数组，如果无法检测返回 null
+  static List<int>? _detectBackgroundColor(img.Image src) {
+    final w = src.width;
+    final h = src.height;
+    
+    // 采样边缘像素（四边各取一定宽度）
+    const int borderWidth = 5;
+    final colorCounts = <String, int>{};
+    
+    // 上边
+    for (int y = 0; y < borderWidth && y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        final p = src.getPixel(x, y);
+        if (p.a < 128) continue; // 跳过透明像素
+        final key = '${p.r},${p.g},${p.b}';
+        colorCounts[key] = (colorCounts[key] ?? 0) + 1;
+      }
+    }
+    
+    // 下边
+    for (int y = h - borderWidth; y < h; y++) {
+      for (int x = 0; x < w; x++) {
+        final p = src.getPixel(x, y);
+        if (p.a < 128) continue;
+        final key = '${p.r},${p.g},${p.b}';
+        colorCounts[key] = (colorCounts[key] ?? 0) + 1;
+      }
+    }
+    
+    // 左边（跳过上下已采样的部分）
+    for (int y = borderWidth; y < h - borderWidth; y++) {
+      for (int x = 0; x < borderWidth && x < w; x++) {
+        final p = src.getPixel(x, y);
+        if (p.a < 128) continue;
+        final key = '${p.r},${p.g},${p.b}';
+        colorCounts[key] = (colorCounts[key] ?? 0) + 1;
+      }
+    }
+    
+    // 右边（跳过上下已采样的部分）
+    for (int y = borderWidth; y < h - borderWidth; y++) {
+      for (int x = w - borderWidth; x < w; x++) {
+        final p = src.getPixel(x, y);
+        if (p.a < 128) continue;
+        final key = '${p.r},${p.g},${p.b}';
+        colorCounts[key] = (colorCounts[key] ?? 0) + 1;
+      }
+    }
+    
+    if (colorCounts.isEmpty) return null;
+    
+    // 找到最常见的颜色（出现次数最多）
+    String mostCommonKey = '';
+    int maxCount = 0;
+    for (final entry in colorCounts.entries) {
+      if (entry.value > maxCount) {
+        maxCount = entry.value;
+        mostCommonKey = entry.key;
+      }
+    }
+    
+    final parts = mostCommonKey.split(',');
+    if (parts.length != 3) return null;
+    
+    return [
+      int.parse(parts[0]),
+      int.parse(parts[1]),
+      int.parse(parts[2]),
+    ];
   }
 
   /// 形态学膨胀（bool 版）：对 true 区域执行最大值扩散
